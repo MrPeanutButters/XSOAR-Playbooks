@@ -1,0 +1,273 @@
+id: PB-RDP-Bruteforce-Investigate-Contain
+name: RDP Brute Force — Investigate & Contain
+version: -1
+fromversion: "6.0.0"
+starttaskid: "0"
+inputs:
+- key: splunk_notable_id
+  required: true
+  value: {}
+- key: failed_login_threshold
+  required: false
+  value:
+    simple: "25"
+- key: observation_window_minutes
+  required: false
+  value:
+    simple: "10"
+- key: auto_block_external_ip
+  required: false
+  value:
+    simple: "true"
+- key: edr_isolate_host
+  required: false
+  value:
+    simple: "true"
+- key: ad_lock_account
+  required: false
+  value:
+    simple: "true"
+- key: notify_channel
+  required: false
+  value:
+    simple: "soc-alerts"
+tasks:
+  "0":
+    id: "0"
+    taskid: 2b9bd7f6-0000-4cce-9a00-111111111111
+    type: start
+    task:
+      id: 2b9bd7f6-0000-4cce-9a00-111111111111
+      name: Start
+    nexttasks:
+      '#none#': ["1"]
+
+  "1":
+    id: "1"
+    taskid: a1b2c3d4-1111-4e88-9a00-222222222222
+    type: regular
+    task:
+      id: a1b2c3d4-1111-4e88-9a00-222222222222
+      name: Pull events from Splunk
+      description: Query Splunk for failed RDP logons linked to the notable.
+      script: SplunkPy|||splunk-search
+      brand: SplunkPy
+    scriptarguments:
+      query:
+        simple: >
+          index=wineventlog sourcetype=XmlWinEventLog:Security
+          (EventCode=4625 OR EventCode=4776)
+          earliest=-${inputs.observation_window_minutes}m
+          | stats count as failures, values(Source_Network_Address) as src_ips, values(Account_Name) as accts, latest(_time) as last_seen by host
+          | where failures >= ${inputs.failed_login_threshold}
+      earliest_time: {simple: "-${inputs.observation_window_minutes}m"}
+      latest_time: {simple: "now"}
+    nexttasks:
+      '#none#': ["2"]
+    outputs:
+    - contextPath: RDPBruteforce.Host
+      type: string
+    - contextPath: RDPBruteforce.SourceIPs
+      type: string
+    - contextPath: RDPBruteforce.Accounts
+      type: string
+    - contextPath: RDPBruteforce.Failures
+      type: number
+
+  "2":
+    id: "2"
+    taskid: 44444444-2222-4a8e-9a00-333333333333
+    type: condition
+    task:
+      id: 44444444-2222-4a8e-9a00-333333333333
+      name: Any offenders found?
+    conditions:
+    - label: "yes"
+      condition:
+      - - operator: greaterThan
+          left:
+            value:
+              simple: RDPBruteforce.Failures
+            iscontext: true
+          right:
+            value:
+              simple: "0"
+    nexttasks:
+      "yes": ["3"]
+      '#default#': ["99"]
+
+  "3":
+    id: "3"
+    taskid: 77777777-3333-4e88-9a00-444444444444
+    type: regular
+    task:
+      id: 77777777-3333-4e88-9a00-444444444444
+      name: Enrich source IPs with Threat Intel
+      description: IP reputation across multiple feeds.
+      script: Builtin|||enrich-indicators
+    scriptarguments:
+      ip:
+        simple: ${RDPBruteforce.SourceIPs}
+    nexttasks:
+      '#none#': ["4"]
+    outputs:
+    - contextPath: IP
+      type: unknown
+
+  "4":
+    id: "4"
+    taskid: 88888888-4444-4e88-9a00-555555555555
+    type: condition
+    task:
+      id: 88888888-4444-4e88-9a00-555555555555
+      name: External vs Internal?
+    conditions:
+    - label: "external"
+      condition:
+      - - operator: notInCIDR
+          left:
+            value:
+              simple: ${RDPBruteforce.SourceIPs}
+            iscontext: true
+          right:
+            value:
+              simple: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    nexttasks:
+      "external": ["5"]
+      '#default#': ["6"]
+
+  "5":
+    id: "5"
+    taskid: 99999999-5555-4e88-9a00-666666666666
+    type: condition
+    task:
+      id: 99999999-5555-4e88-9a00-666666666666
+      name: Auto-block malicious external IPs?
+    conditions:
+    - label: "block"
+      condition:
+      - - operator: isTrue
+          left:
+            value:
+              simple: ${inputs.auto_block_external_ip}
+    nexttasks:
+      "block": ["5a"]
+      '#default#': ["6"]
+
+  "5a":
+    id: "5a"
+    taskid: 11111111-6666-4e88-9a00-777777777777
+    type: regular
+    task:
+      id: 11111111-6666-4e88-9a00-777777777777
+      name: Block IP on firewall
+      description: Push block to perimeter firewall (PAN-OS as example).
+      script: Panorama|||PanoramaBlockIP
+      brand: Panorama
+    scriptarguments:
+      ip: {simple: ${RDPBruteforce.SourceIPs}}
+      direction: {simple: "both"}
+      vsys: {simple: "vsys1"}
+      rulename: {simple: "Auto-Block-RDP-Bruteforce"}
+      commit: {simple: "Yes"}
+    nexttasks:
+      '#none#': ["6"]
+
+  "6":
+    id: "6"
+    taskid: aaaaaaaa-7777-4e88-9a00-888888888888
+    type: condition
+    task:
+      id: aaaaaaaa-7777-4e88-9a00-888888888888
+      name: Contain endpoint / lock accounts?
+    conditions:
+    - label: "do"
+      condition:
+      - - operator: isTrue
+          left:
+            value:
+              simple: ${inputs.edr_isolate_host}
+      - - operator: isTrue
+          left:
+            value:
+              simple: ${inputs.ad_lock_account}
+    nexttasks:
+      "do": ["6a","6b"]
+      '#default#': ["7"]
+
+  "6a":
+    id: "6a"
+    taskid: bbbbbbbb-8888-4e88-9a00-999999999999
+    type: regular
+    task:
+      id: bbbbbbbb-8888-4e88-9a00-999999999999
+      name: Isolate host (Defender for Endpoint)
+      script: MicrosoftDefenderAdvancedThreatProtection|||microsoft-atp-isolate-machine
+      brand: MicrosoftDefenderAdvancedThreatProtection
+    scriptarguments:
+      machine_id: {simple: ${RDPBruteforce.Host}}
+      comment: {simple: "Auto-isolated due to brute-force activity"}
+    nexttasks:
+      '#none#': ["7"]
+
+  "6b":
+    id: "6b"
+    taskid: cccccccc-9999-4e88-9a00-000000000000
+    type: regular
+    task:
+      id: cccccccc-9999-4e88-9a00-000000000000
+      name: Lock user account (Active Directory)
+      script: Active Directory Query v2|||ad-disable-account
+      brand: Active Directory Query v2
+    scriptarguments:
+      username: {simple: ${RDPBruteforce.Accounts}}
+    nexttasks:
+      '#none#': ["7"]
+
+  "7":
+    id: "7"
+    taskid: dddddddd-aaaa-4e88-9a00-111111111112
+    type: regular
+    task:
+      id: dddddddd-aaaa-4e88-9a00-111111111112
+      name: Notify SOC (Slack/Teams)
+      script: SlackV3|||send-notification
+      brand: SlackV3
+    scriptarguments:
+      channel: {simple: ${inputs.notify_channel}}
+      message:
+        simple: >
+          RDP brute-force alert handled.
+          Host: ${RDPBruteforce.Host}
+          Offenders: ${RDPBruteforce.SourceIPs}
+          Accounts: ${RDPBruteforce.Accounts}
+          Actions: TI enrich, ${inputs.auto_block_external_ip} block, ${inputs.edr_isolate_host} isolate, ${inputs.ad_lock_account} AD lock.
+    nexttasks:
+      '#none#': ["8"]
+
+  "8":
+    id: "8"
+    taskid: eeeeeeee-bbbb-4e88-9a00-222222222223
+    type: regular
+    task:
+      id: eeeeeeee-bbbb-4e88-9a00-222222222223
+      name: Create ticket (ServiceNow)
+      script: ServiceNow v2|||servicenow-create-ticket
+      brand: ServiceNow v2
+    scriptarguments:
+      short_description: {simple: "RDP brute-force containment"}
+      description:
+        simple: >
+          Auto-triage & containment via XSOAR.
+          Host=${RDPBruteforce.Host}, SrcIPs=${RDPBruteforce.SourceIPs}, Accounts=${RDPBruteforce.Accounts}
+    nexttasks:
+      '#none#': ["99"]
+
+  "99":
+    id: "99"
+    taskid: ffffffff-cccc-4e88-9a00-333333333334
+    type: title
+    task:
+      id: ffffffff-cccc-4e88-9a00-333333333334
+      name: End
+    nexttasks: {}
