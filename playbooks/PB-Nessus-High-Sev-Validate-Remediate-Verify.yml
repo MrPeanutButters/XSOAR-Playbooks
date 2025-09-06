@@ -1,0 +1,240 @@
+id: PB-Nessus-High-Sev-Validate-Remediate-Verify
+name: Nessus High Severity — Validate, Remediate & Verify
+version: -1
+fromversion: "6.0.0"
+starttaskid: "0"
+inputs:
+- key: asset_ip
+  required: true
+  value: {}
+- key: cve_id
+  required: true
+  value: {}
+- key: min_cvss
+  required: false
+  value:
+    simple: "7.0"
+- key: require_known_exploit
+  required: false
+  value:
+    simple: "false"
+- key: patch_via_ivanti
+  required: false
+  value:
+    simple: "true"
+- key: change_ticket_required
+  required: false
+  value:
+    simple: "true"
+tasks:
+  "0":
+    id: "0"
+    taskid: 01010101-aaaa-4e88-9a00-000000000001
+    type: start
+    task: {id: 01010101-aaaa-4e88-9a00-000000000001, name: Start}
+    nexttasks: {"#none#": ["1"]}
+
+  "1":
+    id: "1"
+    taskid: 02020202-bbbb-4e88-9a00-000000000002
+    type: regular
+    task:
+      id: 02020202-bbbb-4e88-9a00-000000000002
+      name: Pull vuln details from Nessus
+      script: Nessus|||nessus-get-vulnerabilities-by-asset
+      brand: Nessus
+    scriptarguments:
+      hostname: {simple: ${inputs.asset_ip}}
+      cve: {simple: ${inputs.cve_id}}
+    nexttasks: {"#none#": ["2"]}
+    outputs:
+    - contextPath: Nessus.Vulnerabilities
+      type: unknown
+
+  "2":
+    id: "2"
+    taskid: 03030303-cccc-4e88-9a00-000000000003
+    type: condition
+    task:
+      id: 03030303-cccc-4e88-9a00-000000000003
+      name: Meets severity / CVSS threshold?
+    conditions:
+    - label: "yes"
+      condition:
+      - - operator: greaterThanOrEqual
+          left:
+            iscontext: true
+            value: simple: Nessus.Vulnerabilities.cvss
+          right:
+            value: {simple: ${inputs.min_cvss}}
+    nexttasks:
+      "yes": ["3"]
+      '#default#': ["99"]
+
+  "3":
+    id: "3"
+    taskid: 04040404-dddd-4e88-9a00-000000000004
+    type: regular
+    task:
+      id: 04040404-dddd-4e88-9a00-000000000004
+      name: Enrich with KEV & EPSS
+      description: Check CISA KEV and EPSS to prioritize exploitability.
+      script: Threat Intel|||kev-epss-lookup
+    scriptarguments:
+      cve_id: {simple: ${inputs.cve_id}}
+    nexttasks: {"#none#": ["4"]}
+    outputs:
+    - contextPath: Vuln.KEV
+      type: boolean
+    - contextPath: Vuln.EPSS
+      type: number
+
+  "4":
+    id: "4"
+    taskid: 05050505-eeee-4e88-9a00-000000000005
+    type: condition
+    task:
+      id: 05050505-eeee-4e88-9a00-000000000005
+      name: Known exploited or high EPSS?
+    conditions:
+    - label: "priority"
+      condition:
+      - - operator: isTrue
+          left: {iscontext: true, value: simple: Vuln.KEV}
+      - - operator: greaterThan
+          left: {iscontext: true, value: simple: Vuln.EPSS}
+          right: {value: {simple: "0.5"}}
+    - label: "require-exploit"
+      condition:
+      - - operator: isTrue
+          left:
+            value: simple: ${inputs.require_known_exploit}
+    nexttasks:
+      "priority": ["5"]
+      "require-exploit": ["5"]
+      '#default#': ["5"]
+
+  "5":
+    id: "5"
+    taskid: 06060606-ffff-4e88-9a00-000000000006
+    type: regular
+    task:
+      id: 06060606-ffff-4e88-9a00-000000000006
+      name: Open change ticket (if required)
+      script: ServiceNow v2|||servicenow-create-ticket
+      brand: ServiceNow v2
+    scriptarguments:
+      short_description:
+        simple: "Patch ${inputs.cve_id} on ${inputs.asset_ip}"
+      description:
+        simple: >
+          CVE: ${inputs.cve_id}
+          CVSS: ${Nessus.Vulnerabilities.cvss}
+          KEV: ${Vuln.KEV}, EPSS: ${Vuln.EPSS}
+          Reason: High severity and/or exploited in wild.
+    separatecontext: false
+    nexttasks:
+      '#none#': ["6"]
+    quietmode: 2
+    skipunavailable: true
+    continueonerrortype: ""
+    continueonerror: true
+
+  "6":
+    id: "6"
+    taskid: 07070707-1111-4e88-9a00-000000000007
+    type: condition
+    task:
+      id: 07070707-1111-4e88-9a00-000000000007
+      name: Patch via Ivanti?
+    conditions:
+    - label: "yes"
+      condition:
+      - - operator: isTrue
+          left:
+            value: simple: ${inputs.patch_via_ivanti}
+    nexttasks:
+      "yes": ["7"]
+      '#default#': ["8"]
+
+  "7":
+    id: "7"
+    taskid: 08080808-2222-4e88-9a00-000000000008
+    type: regular
+    task:
+      id: 08080808-2222-4e88-9a00-000000000008
+      name: Deploy patch (Ivanti)
+      script: Ivanti|||ivanti-deploy-patch
+      brand: Ivanti
+    scriptarguments:
+      hostname: {simple: ${inputs.asset_ip}}
+      cve: {simple: ${inputs.cve_id}}
+    nexttasks: {"#none#": ["8"]}
+
+  "8":
+    id: "8"
+    taskid: 09090909-3333-4e88-9a00-000000000009
+    type: regular
+    task:
+      id: 09090909-3333-4e88-9a00-000000000009
+      name: Rescan with Nessus (verification)
+      script: Nessus|||nessus-scan-host
+      brand: Nessus
+    scriptarguments:
+      hostname: {simple: ${inputs.asset_ip}}
+      cve: {simple: ${inputs.cve_id}}
+    nexttasks: {"#none#": ["9"]}
+
+  "9":
+    id: "9"
+    taskid: 0a0a0a0a-4444-4e88-9a00-00000000000a
+    type: condition
+    task:
+      id: 0a0a0a0a-4444-4e88-9a00-00000000000a
+      name: Vulnerability remediated?
+    conditions:
+    - label: "yes"
+      condition:
+      - - operator: isEmpty
+          left:
+            iscontext: true
+            value: simple: Nessus.Vulnerabilities
+    nexttasks:
+      "yes": ["10"]
+      '#default#': ["11"]
+
+  "10":
+    id: "10"
+    taskid: 0b0b0b0b-5555-4e88-9a00-00000000000b
+    type: regular
+    task:
+      id: 0b0b0b0b-5555-4e88-9a00-00000000000b
+      name: Close SNOW ticket & notify
+      script: ServiceNow v2|||servicenow-update-ticket
+      brand: ServiceNow v2
+    scriptarguments:
+      state: {simple: "Closed"}
+      comment:
+        simple: "Patched and verified via Nessus rescan."
+    nexttasks: {"#none#": ["99"]}
+
+  "11":
+    id: "11"
+    taskid: 0c0c0c0c-6666-4e88-9a00-00000000000c
+    type: regular
+    task:
+      id: 0c0c0c0c-6666-4e88-9a00-00000000000c
+      name: Escalate remediation failure
+      script: SlackV3|||send-notification
+      brand: SlackV3
+    scriptarguments:
+      channel: {simple: "vuln-remediation"}
+      message:
+        simple: "Rescan shows ${inputs.cve_id} persists on ${inputs.asset_ip}. Manual intervention required."
+    nexttasks: {"#none#": ["99"]}
+
+  "99":
+    id: "99"
+    taskid: 0d0d0d0d-7777-4e88-9a00-00000000000d
+    type: title
+    task: {id: 0d0d0d0d-7777-4e88-9a00-00000000000d, name: End}
